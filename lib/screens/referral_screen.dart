@@ -1,11 +1,15 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
-import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
+import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../data/abtc_data.dart';
 import '../services/location_service.dart';
+import 'feedback_screen.dart';
 
 class ReferralScreen extends StatefulWidget {
   const ReferralScreen({super.key});
@@ -24,10 +28,19 @@ class _ReferralScreenState extends State<ReferralScreen> {
   bool loading = false;
   String? errorMessage;
 
+  // Route shown inside the app
+  List<LatLng> routePoints = [];
+  double? routeMeters;
+  double? routeSeconds;
+  bool routing = false;
+
   Future<void> findNearestAbtc() async {
     setState(() {
       loading = true;
       errorMessage = null;
+      routePoints = [];
+      routeMeters = null;
+      routeSeconds = null;
     });
 
     try {
@@ -67,15 +80,97 @@ class _ReferralScreenState extends State<ReferralScreen> {
     return '${(meters / 1000).toStringAsFixed(1)} km away';
   }
 
+  String formatDuration(double seconds) {
+    final minutes = (seconds / 60).round();
+
+    if (minutes < 60) {
+      return '$minutes min';
+    }
+
+    final hours = minutes ~/ 60;
+    final rest = minutes % 60;
+
+    return rest == 0 ? '$hours hr' : '$hours hr $rest min';
+  }
+
+  // Gets the route and draws it on the in-app map.
   Future<void> openDirections() async {
+    if (nearestAbtc == null || userPosition == null) {
+      return;
+    }
+
+    setState(() {
+      routing = true;
+    });
+
+    try {
+      final url = Uri.parse(
+        'https://router.project-osrm.org/route/v1/driving/'
+            '${userPosition!.longitude},${userPosition!.latitude};'
+            '${nearestAbtc!.longitude},${nearestAbtc!.latitude}'
+            '?overview=full&geometries=geojson',
+      );
+
+      final response = await http.get(url);
+
+      if (response.statusCode != 200) {
+        throw Exception('Route request failed');
+      }
+
+      final data = jsonDecode(response.body);
+      final routes = data['routes'] as List;
+
+      if (routes.isEmpty) {
+        throw Exception('No route found');
+      }
+
+      final route = routes[0];
+      final coords = route['geometry']['coordinates'] as List;
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        routePoints = coords
+            .map(
+              (c) => LatLng(
+            (c[1] as num).toDouble(),
+            (c[0] as num).toDouble(),
+          ),
+        )
+            .toList();
+        routeMeters = (route['distance'] as num).toDouble();
+        routeSeconds = (route['duration'] as num).toDouble();
+        routing = false;
+      });
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        routing = false;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Could not load the route. Check your connection.'),
+        ),
+      );
+    }
+  }
+
+  // Optional: full turn-by-turn navigation in Google Maps (leaves the app).
+  Future<void> openInGoogleMaps() async {
     if (nearestAbtc == null) {
       return;
     }
 
-    final query = Uri.encodeComponent(nearestAbtc!.address);
-
     final url = Uri.parse(
-      'https://www.google.com/maps/search/?api=1&query=$query',
+      'https://www.google.com/maps/dir/?api=1'
+          '&destination=${nearestAbtc!.latitude},${nearestAbtc!.longitude}'
+          '&travelmode=driving',
     );
 
     await launchUrl(url, mode: LaunchMode.externalApplication);
@@ -102,6 +197,17 @@ class _ReferralScreenState extends State<ReferralScreen> {
               urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
               userAgentPackageName: 'com.example.rabiz_check',
             ),
+            // Route line (drawn under the pins)
+            if (routePoints.isNotEmpty)
+              PolylineLayer(
+                polylines: [
+                  Polyline(
+                    points: routePoints,
+                    strokeWidth: 5,
+                    color: Colors.blue,
+                  ),
+                ],
+              ),
             MarkerLayer(
               markers: [
                 // Other ABTCs
@@ -268,13 +374,46 @@ class _ReferralScreenState extends State<ReferralScreen> {
 
                         if (userPosition != null) buildMap(),
 
+                        if (routeMeters != null && routeSeconds != null) ...[
+                          const SizedBox(height: 12),
+                          Text(
+                            'Route: ${(routeMeters! / 1000).toStringAsFixed(1)} km, '
+                                '~${formatDuration(routeSeconds!)} by car',
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+
                         const SizedBox(height: 15),
                         SizedBox(
                           width: double.infinity,
                           child: OutlinedButton.icon(
-                            onPressed: openDirections,
-                            icon: const Icon(Icons.directions),
-                            label: const Text('Get Directions'),
+                            onPressed: routing ? null : openDirections,
+                            icon: routing
+                                ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                              ),
+                            )
+                                : const Icon(Icons.directions),
+                            label: Text(
+                              routePoints.isEmpty
+                                  ? 'Get Directions'
+                                  : 'Refresh Route',
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        SizedBox(
+                          width: double.infinity,
+                          child: TextButton.icon(
+                            onPressed: openInGoogleMaps,
+                            icon: const Icon(Icons.open_in_new),
+                            label: const Text('Open in Google Maps'),
                           ),
                         ),
                       ],
@@ -295,6 +434,23 @@ class _ReferralScreenState extends State<ReferralScreen> {
                         'professional medical evaluation.',
                     style: TextStyle(fontSize: 14),
                   ),
+                ),
+              ),
+
+              const SizedBox(height: 20),
+
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => const FeedbackScreen(),
+                      ),
+                    );
+                  },
+                  child: const Text('Continue'),
                 ),
               ),
             ],
