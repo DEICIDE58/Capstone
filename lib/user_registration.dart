@@ -71,7 +71,7 @@ class _UserRegistrationPageState
 
     if (!mounted) return;
 
-    // Change this to your actual home page.
+
     Navigator.pushReplacement(
       context,
       MaterialPageRoute(
